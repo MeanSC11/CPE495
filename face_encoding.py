@@ -1,13 +1,23 @@
-import dlib
 import cv2
 import numpy as np
+import torch
+from deepface import DeepFace
 
-# โหลดโมเดล Face Recognition
-facerec = dlib.face_recognition_model_v1("models/dlib_face_recognition_resnet_model_v1.dat")
-predictor = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
+# โหลดโมเดล ArcFace
+arcface_model = DeepFace.build_model("ArcFace")  # ไม่ต้องใช้ .to(device)
 
 def encode_face(frame, face):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    shape = predictor(gray, face)
-    encoding = np.array(facerec.compute_face_descriptor(frame, shape))
-    return encoding
+    x1, y1, x2, y2 = face
+    face_crop = frame[y1:y2, x1:x2]
+
+    # ใช้ DeepFace RetinaFace ดึงใบหน้า
+    face_aligned = DeepFace.extract_faces(frame, detector_backend="retinaface", enforce_detection=False)[0]["face"]
+
+    # ปรับขนาดภาพให้ตรงกับโมเดล (112x112)
+    face_resized = cv2.resize(face_aligned, (112, 112))
+
+    # แปลงภาพเป็นเวกเตอร์ 512 มิติ
+    face_tensor = np.expand_dims(face_resized, axis=0)  # เพิ่มมิติให้ตรงกับโมเดล
+    embedding = arcface_model.predict(face_tensor)[0]  # ใช้ predict() แทน
+
+    return embedding
