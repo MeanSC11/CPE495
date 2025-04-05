@@ -1,0 +1,524 @@
+# main.py
+
+import tensorflow as tf
+import torch
+import os
+from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+import cv2  # ไม่ลืมเพิ่มการ import cv2
+
+from face_detection import detect_faces
+from face_encoding import encode_face
+from database import get_student_encodings, recognize_face, mark_attendance
+
+# ตรวจสอบ GPU
+print("TensorFlow CUDA Available:", tf.config.list_physical_devices('GPU'))
+print(f"CUDA Available: {torch.cuda.is_available()}")
+print(f"Number of GPUs: {torch.cuda.device_count()}")
+
+# ตั้งค่า TensorFlow ให้ใช้ GPU 0 (การ์ดจอหลัก)
+physical_devices = tf.config.list_physical_devices('GPU')
+if len(physical_devices) > 0:
+    tf.config.set_visible_devices(physical_devices[0], 'GPU')  # ใช้ GPU 0
+else:
+    print("GPU 0 not found, defaulting to CPU.")
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Running on: {device.upper()}")
+
+os.makedirs("result", exist_ok=True)
+
+video_path = "videos/VideoCut_5_min/output_segment_1.mp4"
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
+    print("Can't Open Video")
+    exit()
+
+frame_count = 0
+student_encodings = get_student_encodings()  # โหลดเพียงครั้งเดียว
+
+def process_face(face, frame):
+    encoding = encode_face(frame, face)
+    if encoding is None:
+        print("Skipping invalid face")
+        return
+
+    print("Face Encoding Complete")
+    recognized_id = recognize_face(encoding, student_encodings)
+
+    if recognized_id:
+        print(f"Recognized Student ID: {recognized_id}")
+        mark_attendance(recognized_id, date.today())
+    else:
+        print("Face Not Recognized")
+
+with ThreadPoolExecutor() as executor:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Video End!")
+            break
+
+        frame_count += 1
+
+        if frame_count % 5 != 0:
+            continue
+
+        print(f"Processing Frame {frame_count}")
+
+        frame_resized = cv2.resize(frame, (640, 360))
+        faces = detect_faces(frame_resized)
+
+        print(f"Detected {len(faces)} Faces")
+        for face in faces:
+            executor.submit(process_face, face, frame_resized.copy())
+
+cap.release()
+cv2.destroyAllWindows()
+print("Program End...")
+-----------------------------------------------------------------------------
+# face_encoding.py
+
+import cv2
+import numpy as np
+from deepface import DeepFace
+import os
+import tensorflow as tf
+
+# ตั้งค่าให้ใช้ GPU 0 ใน TensorFlow
+physical_devices = tf.config.list_physical_devices('GPU')
+if len(physical_devices) > 0:
+    tf.config.set_visible_devices(physical_devices[0], 'GPU')  # ใช้ GPU 0
+else:
+    print("GPU 0 not found, defaulting to CPU.")
+
+arcface_model = DeepFace.build_model("ArcFace")
+
+os.makedirs("result", exist_ok=True)
+
+def encode_face(frame, face):
+    x1, y1, x2, y2 = face
+
+    if x1 >= x2 or y1 >= y2:
+        print(f"Invalid face coordinates: {face}")
+        return None
+
+    face_crop = frame[y1:y2, x1:x2]
+
+    if face_crop.shape[0] == 0 or face_crop.shape[1] == 0:
+        print("Invalid face crop: Zero dimension")
+        return None
+
+    # ปรับขนาดก่อนที่จะบันทึก
+    face_resized = cv2.resize(face_crop, (224, 300))  # ปรับขนาดที่นี่
+
+    # บันทึกรูปใบหน้าที่ตัดไว้ในโฟลเดอร์ result/
+    #filename = f"images/resultFromFRAS/GPU8-f5-d0.2-e640x640/face_{x1}_{y1}.jpg"
+    #cv2.imwrite(filename, face_resized)  # บันทึกภาพที่ปรับขนาดแล้ว
+    #print(f"Saved face to: {filename}")
+
+    representation = DeepFace.represent(face_resized, model_name="ArcFace", enforce_detection=False)
+
+    if not representation:
+        print("No embedding generated")
+        return None
+
+    return np.array(representation[0]['embedding']).flatten()
+-----------------------------------------------------------------------------
+# face_detection.py
+
+import cv2
+import numpy as np
+import os
+
+# โหลดโมเดล DNN สำหรับตรวจจับใบหน้า
+model_file = "models/opencv_face_detector_uint8.pb"
+config_file = "models/opencv_face_detector.pbtxt"
+
+net = cv2.dnn.readNetFromTensorflow(model_file, config_file)
+
+# ตั้งค่าให้ใช้ GPU 0 (การ์ดจอหลัก) โดยอัตโนมัติ
+if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+    cv2.cuda.setDevice(0)  # เลือก GPU 0
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+else:
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_DEFAULT)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+def detect_faces(frame):
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300),
+                                 [104, 117, 123], False, False)
+    net.setInput(blob)
+    detections = net.forward()
+
+    faces = []
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.2:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            x1, y1, x2, y2 = box.astype("int")
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w - 1, x2), min(h - 1, y2)
+            faces.append((x1, y1, x2, y2))
+
+    return faces
+-----------------------------------------------------------------------------
+#database.py
+
+import pyodbc
+import numpy as np
+from config import DATABASE_CONFIG
+from scipy.spatial import distance
+from datetime import date
+
+# ตั้งค่าการเชื่อมต่อ
+conn = pyodbc.connect(f"DRIVER={DATABASE_CONFIG['DRIVER']};"
+                      f"SERVER={DATABASE_CONFIG['SERVER']};"
+                      f"DATABASE={DATABASE_CONFIG['DATABASE']};"
+                      f"UID={DATABASE_CONFIG['UID']};"
+                      f"PWD={DATABASE_CONFIG['PWD']};"
+                      "Encrypt=yes;"
+                      "TrustServerCertificate=no;"
+                      "Connection Timeout=30;")
+cursor = conn.cursor()
+
+# 🔹 บันทึกข้อมูลใบหน้าเข้าไปใน Students
+def save_encoding(student_id, encoding):
+    encoding_bytes = encoding.tobytes()
+    query = "UPDATE Students SET face_embedding = ? WHERE student_id = ?"
+    cursor.execute(query, (encoding_bytes, student_id))
+    conn.commit()
+
+# 🔹 ดึงข้อมูล Face Encoding ของนักศึกษาทั้งหมด
+def get_student_encodings():
+    query = "SELECT student_id, face_embedding FROM Students WHERE face_embedding IS NOT NULL"
+    print(f"Executing SQL Query: {query}")  # Debug log
+    
+    cursor.execute(query)
+    students = cursor.fetchall()
+    
+    print(f"Found {len(students)} students with encodings")  # Debug log
+    
+    student_encodings = {}
+    for student_id, encoding_bytes in students:
+        encoding = np.frombuffer(encoding_bytes, dtype=np.float64)
+        student_encodings[student_id] = encoding
+    
+    return student_encodings
+
+# 🔹 ค้นหาใบหน้าที่ตรงกับฐานข้อมูล
+def recognize_face(encoding, student_encodings):
+    for student_id, db_encoding in student_encodings.items():
+        dist = distance.euclidean(encoding, db_encoding)
+        print(f"Comparing {student_id}: Distance = {dist}")  # Debug log
+        if dist < 0.6:  # ค่าความคล้ายกัน
+            return student_id
+    return None
+
+# 🔹 อัปเดตการเช็คชื่อใน Attendance
+def mark_attendance(student_id, check_date):
+    query = """
+    INSERT INTO Attendance (course_id, course_name, student_id, first_name, last_name, date_check, status_student)
+    SELECT e.course_id, c.course_name, s.student_id, s.student_name, '', ?, '00'
+    FROM Students s
+    JOIN Enrollment e ON s.student_id = e.student_id
+    JOIN Courses c ON e.course_id = c.course_id
+    WHERE s.student_id = ?
+    """
+    cursor.execute(query, check_date, student_id)
+    conn.commit()
+    print(f"Attendance Recorded for Student {student_id} on {check_date}")
+-----------------------------------------------------------------------------
+#Create_FE.py (create face embedding refferance)
+
+
+import cv2
+import numpy as np
+import pyodbc
+import random
+import json  # ใช้ json แทน pickle
+from insightface.app import FaceAnalysis  # ใช้ ArcFace
+from config import DATABASE_CONFIG
+from PIL import Image
+import io
+
+# 🔹 เชื่อมต่อฐานข้อมูล Azure SQL
+conn = pyodbc.connect(f"DRIVER={DATABASE_CONFIG['DRIVER']};"
+                      f"SERVER={DATABASE_CONFIG['SERVER']};"
+                      f"DATABASE={DATABASE_CONFIG['DATABASE']};"
+                      f"UID={DATABASE_CONFIG['UID']};"
+                      f"PWD={DATABASE_CONFIG['PWD']};"
+                      "Encrypt=yes;"
+                      "TrustServerCertificate=no;"
+                      "Connection Timeout=30;")
+cursor = conn.cursor()
+
+# 🔹 โหลดโมเดล ArcFace (ใช้ GPU ถ้ามี)
+face_app = FaceAnalysis(name='buffalo_l', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+face_app.prepare(ctx_id=0)  # ใช้ GPU ถ้ามี
+
+# 🔹 โหลดวิดีโอ
+video_path = "videos/REF Face/65009974.mp4"
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
+    print("Can't Open Video")
+    exit()
+
+# 🔹 กรอกรหัสนักศึกษา
+student_id = input("Insert StudentID: ")
+
+# 🔹 เลือกเฟรมที่กระจายจากวิดีโอ
+frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+selected_frames = sorted([int(i * frame_count / 10) for i in range(10)])  # เลือกเฟรมที่กระจาย
+
+face_embeddings = []
+
+# 🔹 สร้างฟังก์ชันสำหรับบันทึกภาพต้นฉบับ
+def save_original_frame(frame, image_count):
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+    pil_img = Image.fromarray(img)
+    pil_img.save(f"images/results/original_frame_{image_count}.png")  # บันทึกภาพต้นฉบับ
+
+# 🔹 สร้างและบันทึกภาพจากเฟรมต้นฉบับ 10 เฟรม
+image_count = 1  # เปลี่ยนให้เริ่มต้นที่ 1
+processed_frames = 0  # ใช้นับจำนวนเฟรมที่ประมวลผลสำเร็จ
+
+for idx, frame_no in enumerate(selected_frames):
+    while processed_frames < 10:
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)  # เลื่อนวิดีโอไปยังเฟรมที่เลือก
+            ret, frame = cap.read()
+
+            if not ret:
+                print(f"Skipped Frame {frame_no}: Failed to read frame, trying next.")
+                frame_no += 1  # เลือกเฟรมถัดไป
+                if frame_no >= frame_count:
+                    print("Reached end of video.")
+                    break
+                continue  # ข้ามเฟรมที่ไม่สามารถอ่านได้
+
+            print(f"Processing Frame {frame_no}")
+
+            # 🔹 ตรวจจับใบหน้า
+            faces_detected = face_app.get(frame)
+            if len(faces_detected) == 0:
+                print(f"Skipped Frame {frame_no}: No face detected.")
+                frame_no += 1  # เลือกเฟรมถัดไป
+                if frame_no >= frame_count:
+                    print("Reached end of video.")
+                    break
+                continue  # ข้ามเฟรมที่ไม่มีใบหน้า
+
+            # เลือกใบหน้าหรือใบหน้าที่ดีที่สุด
+            face_embedding = faces_detected[0].embedding
+            face_embeddings.append(face_embedding)
+
+            # 🔹 บันทึกภาพต้นฉบับ
+            save_original_frame(frame, image_count)
+            image_count += 1  # เพิ่มค่าหมายเลขภาพเมื่อบันทึกสำเร็จ
+
+            processed_frames += 1  # นับเฟรมที่ประมวลผลสำเร็จ
+
+            # 🔹 เพิ่มแสง
+            for _ in range(10):  
+                bright_embedding = face_embedding + np.random.normal(0.1, 0.1, face_embedding.shape)
+                face_embeddings.append(bright_embedding)  # บันทึก embedding ที่มีแสงเพิ่ม
+
+            # 🔹 ลดแสง
+            for _ in range(10):  
+                dark_embedding = face_embedding - np.random.normal(0.1, 0.1, face_embedding.shape)
+                face_embeddings.append(dark_embedding)  # บันทึก embedding ที่มีแสงลด
+
+            # 🔹 เบลอภาพ
+            for _ in range(10):  
+                blur_embedding = np.copy(face_embedding)  # เบลอภาพโดยการทำให้ค่าของ embedding เปลี่ยนไป
+                blur_embedding += np.random.normal(0, 0.1, blur_embedding.shape)
+                face_embeddings.append(blur_embedding)  # บันทึก embedding ที่เบลอ
+
+            # 🔹 ภาพหาย
+            for _ in range(10):  
+                missing_embedding = face_embedding + np.random.normal(0, 0.15, face_embedding.shape)  # ทำให้มีการหายบางข้อมูล
+                face_embeddings.append(missing_embedding)  # บันทึก embedding ที่ขาดหาย
+
+            # 🔹 เพิ่ม Noise แบบอื่นๆ
+            for _ in range(50):  
+                modified_embedding = face_embedding + np.random.normal(0, 0.1, face_embedding.shape)
+                face_embeddings.append(modified_embedding)  # บันทึก embedding ที่มี noise
+
+            # 🔹 แปลง `face_embeddings` ทั้งหมดเป็น JSON
+            face_embeddings_json = json.dumps([embedding.tolist() for embedding in face_embeddings])
+
+            # 🔹 แปลง JSON เป็นไบต์ (binary) ก่อนบันทึกลงฐานข้อมูล
+            face_embeddings_binary = face_embeddings_json.encode('utf-8')
+
+            # 🔹 บันทึก face_embeddings ลงในฐานข้อมูล
+            cursor.execute("""
+                UPDATE Students
+                SET face_embedding = ?
+                WHERE student_id = ?
+            """, (face_embeddings_binary, student_id))
+            conn.commit()
+
+            print(f"Student {student_id} has face embeddings stored")
+
+            break  # หากการประมวลผลเฟรมสำเร็จ ให้หยุดลูปนี้และไปที่เฟรมถัดไป
+
+        except Exception as e:
+            print(f"Error processing frame {frame_no}: {e}")
+            frame_no += 1  # เลือกเฟรมถัดไปในกรณีที่มีข้อผิดพลาด
+            if frame_no >= frame_count:
+                print("Reached end of video.")
+                break
+            continue  # ข้ามกรณีที่มีข้อผิดพลาดแล้วไปที่เฟรมถัดไป
+
+# 🔹 แสดงข้อความเมื่อเสร็จสิ้น
+print(f"10 original images saved to the face folder.")
+print(f"100 embeddings (including noise, brightness, etc.) saved.")
+print(f"Student {student_id} has face embeddings stored.")
+
+cap.release()
+conn.close()
+-----------------------------------------------------------------------------
+#config.py
+
+DATABASE_CONFIG = {
+    "DRIVER": "{ODBC Driver 18 for SQL Server}",
+    "SERVER": "fras.database.windows.net",
+    "DATABASE": "FRAS",
+    "UID": "cpe495",
+    "PWD": "Mean2003."
+}
+FACE_RECOGNITION_THRESHOLD = 0.6
+-----------------------------------------------------------------------------
+#CapIpCamTest.py (Cap Video From RTSP of IP Camera)
+
+import cv2
+import time
+from datetime import datetime
+
+# กำหนด URL RTSP
+USERNAME = "MeanSC11"
+PASSWORD = "Mean2003."
+CAMERA_IP = "192.168.1.100"
+RTSP_URL = "rtsp://MeanSC11:Mean2003.@192.168.1.100:554/stream1"
+
+# เวลาที่ต้องการเริ่มบันทึก
+start_hour = 11
+start_minute = 45
+
+# เปิดการเชื่อมต่อกล้อง
+cap = cv2.VideoCapture(RTSP_URL)
+
+if not cap.isOpened():
+    print("Error: Unable to connect to the camera.")
+    exit()
+else:
+    print("Connected to Camera!!")
+
+# ตรวจสอบว่ากล้องส่งภาพมาได้หรือไม่
+ret, frame = cap.read()
+if not ret:
+    print("Error: Failed to grab frame from camera.")
+    cap.release()
+    exit()
+
+# รอจนถึงเวลาเริ่ม
+while True:
+    now = datetime.now()
+    if now.hour == start_hour and now.minute == start_minute:
+        print(f"Starting recording at {start_hour}:{start_minute}")
+        break
+    time.sleep(1)  # เช็คทุก 1 วินาที
+
+# ตรวจสอบอีกครั้งว่ากล้องยังส่งภาพมาได้อยู่
+ret, frame = cap.read()
+if not ret:
+    print("Error: Failed to grab frame from camera.")
+    cap.release()
+    exit()
+
+# ดึงขนาดวิดีโอจากกล้อง
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+
+# ใช้ค่าเริ่มต้นหากดึงข้อมูลไม่ได้
+if frame_width == 0 or frame_height == 0:
+    frame_width, frame_height = 1920, 1080  # ปรับค่าให้เหมาะกับกล้องของคุณ
+
+print(f"Connected to camera. Resolution: {frame_width}x{frame_height}")
+print(f"FPS from camera: {fps}")
+
+# ตั้งค่าการบันทึกวิดีโอ
+fourcc = cv2.VideoWriter_fourcc(*"avc1")  # ใช้ mp4v ถ้า H264 มีปัญหา
+out = cv2.VideoWriter("full_record.mp4", fourcc, fps, (frame_width, frame_height))
+
+# เริ่มจับเวลา (บันทึก 45 นาที)
+record_time = 45 * 60  # 45 นาที (2700 วินาที)
+start_time = time.time()
+result_time = record_time/60
+
+print(f"Recording video for {result_time} minutes...")
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    
+    if not ret:
+        print("Error: Failed to grab frame.")
+        break
+
+    # คำนวณเวลานับถอยหลัง
+    elapsed_time = time.time() - start_time
+    remaining_time = max(0, record_time - elapsed_time)
+    minutes = int(remaining_time // 60)
+    seconds = int(remaining_time % 60)
+    countdown_text = f"Time Left: {minutes:02}:{seconds:02}"
+
+    # เพิ่มข้อความเวลานับถอยหลังลงบนเฟรม
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(frame, countdown_text, (50, 50), font, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
+    out.write(frame)
+
+    if remaining_time <= 0:
+        break
+
+cap.release()
+out.release()
+print("Recording completed. Video saved as 'full_record.mp4'.")
+
+# *** แบ่งไฟล์ออกเป็น 30 นาที และ 15 นาที ***
+print("Splitting video into 30-minute and 15-minute parts...")
+
+# โหลดวิดีโอที่บันทึกเสร็จ
+cap = cv2.VideoCapture("full_record.mp4")
+
+# คำนวณจำนวนเฟรม
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+frame_30min = int(fps * 30 * 60)
+frame_15min = total_frames - frame_30min
+
+# ฟังก์ชันตัดวิดีโอ
+def split_video(start_frame, end_frame, output_name):
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    out = cv2.VideoWriter(output_name, fourcc, fps, (frame_width, frame_height))
+    for _ in range(start_frame, end_frame):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out.write(frame)
+    out.release()
+
+# ตัดคลิป
+split_video(0, frame_30min, "part1_30min.mp4")
+split_video(frame_30min, total_frames, "part2_15min.mp4")
+
+cap.release()
+out.release()
+print("Splitting completed: 'part1_30min.mp4' and 'part2_15min.mp4'.")
+-----------------------------------------------------------------------------

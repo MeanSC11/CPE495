@@ -1,0 +1,148 @@
+#main.py
+import cv2
+import tensorflow as tf
+import torch
+import os
+from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+
+from face_detection import detect_faces
+from face_encoding import encode_face
+from database import get_student_encodings, recognize_face, mark_attendance
+
+# ตรวจสอบ GPU
+print("TensorFlow CUDA Available:", tf.config.list_physical_devices('GPU'))
+print(f"CUDA Available: {torch.cuda.is_available()}")
+print(f"Number of GPUs: {torch.cuda.device_count()}")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Running on: {device.upper()}")
+
+os.makedirs("result", exist_ok=True)
+
+video_path = "videos/VideoCut_5_min/output_segment_1.mp4"
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
+    print("Can't Open Video")
+    exit()
+
+frame_count = 0
+student_encodings = get_student_encodings()  # โหลดเพียงครั้งเดียว
+
+def process_face(face, frame):
+    encoding = encode_face(frame, face)
+    if encoding is None:
+        print("Skipping invalid face")
+        return
+
+    print("Face Encoding Complete")
+    recognized_id = recognize_face(encoding, student_encodings)
+
+    if recognized_id:
+        print(f"Recognized Student ID: {recognized_id}")
+        mark_attendance(recognized_id, date.today())
+    else:
+        print("Face Not Recognized")
+
+with ThreadPoolExecutor() as executor:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Video End!")
+            break
+
+        frame_count += 1
+
+        if frame_count % 5 != 0:
+            continue
+
+        print(f"Processing Frame {frame_count}")
+
+        frame_resized = cv2.resize(frame, (640, 360))
+        faces = detect_faces(frame_resized)
+
+        print(f"Detected {len(faces)} Faces")
+        for face in faces:
+            executor.submit(process_face, face, frame_resized.copy())
+
+cap.release()
+cv2.destroyAllWindows()
+print("Program End...")
+
+------------------------------------------------------------------------------
+#face_detection.py
+import cv2
+import numpy as np
+import os
+
+# โหลดโมเดล DNN สำหรับตรวจจับใบหน้า
+model_file = "models/opencv_face_detector_uint8.pb"
+config_file = "models/opencv_face_detector.pbtxt"
+
+net = cv2.dnn.readNetFromTensorflow(model_file, config_file)
+
+# ใช้ GPU ถ้ามี
+if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+else:
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_DEFAULT)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+def detect_faces(frame):
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300),
+                                 [104, 117, 123], False, False)
+    net.setInput(blob)
+    detections = net.forward()
+
+    faces = []
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.4:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            x1, y1, x2, y2 = box.astype("int")
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w - 1, x2), min(h - 1, y2)
+            faces.append((x1, y1, x2, y2))
+
+    return faces
+------------------------------------------------------------------------------
+#face_encoding.py
+import cv2
+import numpy as np
+from deepface import DeepFace
+import os
+
+arcface_model = DeepFace.build_model("ArcFace")
+os.makedirs("result", exist_ok=True)
+
+def encode_face(frame, face):
+    x1, y1, x2, y2 = face
+
+    if x1 >= x2 or y1 >= y2:
+        print(f"Invalid face coordinates: {face}")
+        return None
+
+    face_crop = frame[y1:y2, x1:x2]
+
+    if face_crop.shape[0] == 0 or face_crop.shape[1] == 0:
+        print("Invalid face crop: Zero dimension")
+        return None
+
+    # ปรับขนาดก่อนที่จะบันทึก
+    face_resized = cv2.resize(face_crop, (224, 224))  # ปรับขนาดที่นี่
+
+    # บันทึกรูปใบหน้าที่ตัดไว้ในโฟลเดอร์ result/
+    filename = f"images/resultFromFRAS/result14-f1-d0.4-e224/face_{x1}_{y1}.jpg"
+    cv2.imwrite(filename, face_resized)  # บันทึกภาพที่ปรับขนาดแล้ว
+    print(f"Saved face to: {filename}")
+
+    representation = DeepFace.represent(face_resized, model_name="ArcFace", enforce_detection=False)
+
+    if not representation:
+        print("No embedding generated")
+        return None
+
+    return np.array(representation[0]['embedding']).flatten()
+------------------------------------------------------------------------------

@@ -1,0 +1,32 @@
+# Ignore image files
+*.jpg
+*.jpeg
+*.png
+*.gif
+images/
+
+# Ignore video files
+*.mp4
+*.avi
+*.mov
+videos/
+5-0901/
+
+# Ignore model files
+*.h5
+*.pkl
+*.pt
+*.pth
+*.dat
+*.dll
+*.pyd
+*.pb
+*.pbtxt
+models/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore TensorFlow and Clang DLL
+tf_env/
