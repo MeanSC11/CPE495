@@ -11,7 +11,7 @@ CAMERA_IP = "192.168.1.100"
 RTSP_URL = "rtsp://MeanSC11:Mean2003.@192.168.1.100:554/stream1"
 
 # เวลาที่ต้องการเริ่มบันทึก
-start_hour = 11
+start_hour = 8
 start_minute = 45
 
 # เปิดการเชื่อมต่อกล้อง

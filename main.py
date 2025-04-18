@@ -1,9 +1,11 @@
+# main.py
+
 import tensorflow as tf
 import torch
 import os
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
-import cv2
+import cv2  # ไม่ลืมเพิ่มการ import cv2
 
 from face_detection import detect_faces
 from face_encoding import encode_face
@@ -26,7 +28,8 @@ print(f"Running on: {device.upper()}")
 
 os.makedirs("result", exist_ok=True)
 
-video_path = "videos/VideoCut_5_min/output_segment_1.mp4"
+#video_path = "videos/VideoCut_5_min/output_segment_1.mp4"
+video_path = "5-0901/part1_30min-sec002.mp4"
 cap = cv2.VideoCapture(video_path)
 
 if not cap.isOpened():

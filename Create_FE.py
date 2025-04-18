@@ -1,6 +1,5 @@
 #Create_FE.py (create face embedding refferance)
 
-
 import cv2
 import numpy as np
 import pyodbc
