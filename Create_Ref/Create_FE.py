@@ -9,6 +9,14 @@ from insightface.app import FaceAnalysis  # ใช้ ArcFace
 from config import DATABASE_CONFIG
 from PIL import Image
 import io
+import os
+
+# Patch for deprecated `np.object` in onnx
+if not hasattr(np, "object"):
+    np.object = object
+
+# Ensure `onnx` is not used by explicitly disabling it in the environment
+os.environ["INSIGHTFACE_USE_ONNX"] = "0"
 
 # 🔹 เชื่อมต่อฐานข้อมูล Azure SQL
 conn = pyodbc.connect(f"DRIVER={DATABASE_CONFIG['DRIVER']};"
@@ -23,10 +31,10 @@ cursor = conn.cursor()
 
 # 🔹 โหลดโมเดล ArcFace (ใช้ GPU ถ้ามี)
 face_app = FaceAnalysis(name='buffalo_l', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-face_app.prepare(ctx_id=0)  # ใช้ GPU ถ้ามี
+face_app.prepare(ctx_id=0, det_size=(640, 640))  # ใช้ GPU ถ้ามี, กำหนดขนาดการตรวจจับ
 
 # 🔹 โหลดวิดีโอ
-video_path = "videos/REF Face/65009974.mp4"
+video_path = "../videos/REF Face/65009974.mp4"
 cap = cv2.VideoCapture(video_path)
 
 if not cap.isOpened():
